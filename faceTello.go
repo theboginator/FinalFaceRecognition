@@ -169,7 +169,7 @@ func main() {
 				newCorrection, movement := getTargetOutput(center, correction) //Run our error checking algorithm to determine where to go
 				correction = newCorrection
 				gocv.Circle(&img, newCorrection, 10, colornames.Midnightblue, 3) //Mark the simulated movement to the detection
-				handleMovement(movement, *drone)
+				handleMovement(movement, *drone)                                 //Move the drone based on the error-corrected X and Y velocities
 				//log.Println("found a face,", rect, "of size ", rect.Size(), "with center ", center, "at ", time.Now())
 			}
 		}
@@ -207,10 +207,10 @@ func getTargetOutput(target image.Point, tracker image.Point) (image.Point, imag
 	integralY := lastIntegralY + diffY*float64(timeDiff)
 	derivativeX = (diffX - lastErrorX) / float64(timeDiff)
 	derivativeY = (diffY - lastErrorY) / float64(timeDiff)
-	velX := (KpX * diffX) + (KiX * integralX) //+(KdX*derivativeX)
-	velY := (KpY * diffY) + (KiY * integralY) //+(KdY*derivativeY)
-	newX := float64(tracker.X) + velX
-	newY := float64(tracker.Y) + velY
+	velX := (KpX * diffX) + (KiX * integralX) + (KdX * derivativeX) //use PID control to calculate x velocity
+	velY := (KpY * diffY) + (KiY * integralY) + (KdY * derivativeY) //use PID control to calculate Y velocity
+	newX := float64(tracker.X) + velX                               //Where to move our tracking dot to
+	newY := float64(tracker.Y) + velY                               //Where to move our tracking dot to
 	lastUpdate = time.Now()
 	lastErrorX = diffX
 	lastErrorY = diffY
@@ -221,10 +221,10 @@ func getTargetOutput(target image.Point, tracker image.Point) (image.Point, imag
 }
 
 func handleMovement(target image.Point, drone tello.Driver) {
-	if target.X > 0 {
+	if target.X > 0 { //If X > 0, then face is to left of drone, so we want to move left
 		xval := int(math.Abs(float64(target.X)))
 		drone.Left(xval)
-	} else if target.X < 0 {
+	} else if target.X < 0 { //If x < 0, then face is to right of drone, want to move right. simply get absolute value of x to get speed to hand off to drone command.
 		xval := int(math.Abs(float64(target.X)))
 		drone.Right(xval)
 	} else {
