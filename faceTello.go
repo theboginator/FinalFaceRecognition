@@ -43,7 +43,8 @@ const (
 	MAXHEIGHT = 720
 	CURSORX   = MAXWIDTH / 2
 	CURSORY   = MAXHEIGHT / 2
-	TOOCLOSE  = 200 //Any detected object wider than this width should stop the drone
+	TOOCLOSE  = 350 //Any detected object wider than this width should stop the drone
+	TOOFAR    = 50  //Any detected object smaller than this width should be dropped from detection
 )
 
 var left int
@@ -60,10 +61,12 @@ var correction = image.Point{CURSORX, CURSORY} //This is our simulated movement 
 var oldCRC uint16
 var lastNewFrameTime time.Time
 var frameDiff time.Duration
-var timeDiff time.Duration
+var timeDiff int64
 var newImage bool
+var moveDrone = false //control the drone movement rate at half the sample rate
 
 var lastUpdate time.Time
+var firstErrorPass = true //On first pass, set lastUpdate to time.Now, then make false.
 var lastErrorX float64 = 0
 var lastErrorY float64 = 0
 var changeX float64 = 0
@@ -74,13 +77,14 @@ var lastIntegralX float64 = 0
 var lastIntegralY float64 = 0
 var KpX = 0.05
 var KpY = 0.05
-var KiX float64 = 0 //0.0005
-var KiY float64 = 0 //0.0005
-var KdX float64 = 0
-var KdY float64 = 0
+var KiX float64 = 0.00001
+var KiY float64 = 0.00001
+var KdX float64 = -2.0
+var KdY float64 = -2.0
+var drone = tello.NewDriver("8890")
 
 func main() {
-	drone := tello.NewDriver("8890")
+
 	//window := opencv.NewWindowDriver()
 	window := gocv.NewWindow("Demo2")
 	classifier := gocv.NewCascadeClassifier()
@@ -127,6 +131,7 @@ func main() {
 	)
 
 	robot.Start(false)
+	drone.TakeOff()
 	for {
 		buf := make([]byte, frameSize)
 		if _, err := io.ReadFull(ffmpegOut, buf); err != nil {
@@ -157,21 +162,35 @@ func main() {
 		if newImage {
 			imageRectangles := classifier.DetectMultiScale(img)
 			for _, rect := range imageRectangles {
-				length = right - left
-				height = bottom - top
-				centerL = left + (length / 2)
-				centerH = bottom + (height / 2)
-				center := getCenter(rect)
-				gocv.Rectangle(&img, rect, colornames.Cadetblue, 3)          //Box our detection
-				gocv.Circle(&img, center, 5, colornames.Cadetblue, 3)        //Mark the center of the detection
-				gocv.Line(&img, center, crosshair, colornames.Aquamarine, 3) //Draw a line from center to crosshair
-				//HERE WE WANT TO MOVE OUR TRACKER TOWARDS THE DETECTION USING PID CONTROL ALGORITHM
-				newCorrection, movement := getTargetOutput(center, correction) //Run our error checking algorithm to determine where to go
-				correction = newCorrection
-				gocv.Circle(&img, newCorrection, 10, colornames.Midnightblue, 3) //Mark the simulated movement to the detection
-				handleMovement(movement, *drone)                                 //Move the drone based on the error-corrected X and Y velocities
+				center, size := getCenter(rect)
+				if size.X > TOOFAR {
+					//fmt.Println("Object size: ", size.X, "x", size.Y)
+					gocv.Rectangle(&img, rect, colornames.Cadetblue, 3)          //Box our detection
+					gocv.Circle(&img, center, 5, colornames.Cadetblue, 3)        //Mark the center of the detection
+					gocv.Line(&img, center, crosshair, colornames.Aquamarine, 3) //Draw a line from center to crosshair
+					//HERE WE WANT TO MOVE OUR TRACKER TOWARDS THE DETECTION USING PID CONTROL ALGORITHM
+					newCorrection, movement := getTargetOutput(center, correction) //Run our error checking algorithm to determine where to go
+					correction = newCorrection
+					if moveDrone {
+						if size.X > TOOCLOSE {
+							fmt.Println("Too close!")
+							drone.Land()
+						} else if size.X > TOOFAR {
+							gocv.Circle(&img, newCorrection, 10, colornames.Midnightblue, 3) //Mark the simulated movement to the detection
+							handleMovement(movement)                                         //Move the drone based on the error-corrected X and Y velocities
+							//time.Sleep(200)
+						} else {
+							drone.Hover()
+						}
+					}
+					moveDrone = !moveDrone
+				} else {
+					fmt.Println("Too far away")
+				}
 				//log.Println("found a face,", rect, "of size ", rect.Size(), "with center ", center, "at ", time.Now())
 			}
+		} else {
+			fmt.Println("No new data")
 		}
 
 		window.IMShow(img)
@@ -186,58 +205,94 @@ func main() {
 	}
 }
 
-func getCenter(rect image.Rectangle) image.Point {
+func getCenter(rect image.Rectangle) (image.Point, image.Point) {
 	cornerA := image.Point{rect.Max.X, rect.Max.Y}
 	cornerB := image.Point{rect.Min.X, rect.Min.Y}
-	rectWidth := cornerB.X + (rect.Dx() / 2)
-	rectHeight := cornerA.Y - (rect.Dy() / 2)
-	return image.Point{rectWidth, rectHeight}
+	centerX := cornerB.X + (rect.Dx() / 2)
+	centerY := cornerA.Y - (rect.Dy() / 2)
+	return image.Point{centerX, centerY}, image.Point{rect.Dx(), rect.Dy()}
 }
 
 func getTargetOutput(target image.Point, tracker image.Point) (image.Point, image.Point) {
 	currentTime := time.Now()
-	timeDiff := currentTime.Sub(lastUpdate).Milliseconds()
+	if firstErrorPass || currentTime.Sub(lastUpdate).Milliseconds() == 0 {
+		timeDiff = 60
+		firstErrorPass = false
+	} else {
+		timeDiff = currentTime.Sub(lastUpdate).Milliseconds()
+	}
+	//fmt.Println("Time diff: ", timeDiff)
 	diffX := float64(target.X - tracker.X)
 	diffY := float64(target.Y - tracker.Y)
 	changeX = lastErrorX - diffX
 	changeY = lastErrorY - diffY
-	fmt.Println("changeX", changeX)
-	fmt.Println("changeY", changeY)
+	//fmt.Println("DetectedX:", target.X, "DetectedY:", target.Y, "trackerX:", tracker.X, "trackerY:", tracker.Y)
+	//fmt.Println("last integral: ", lastIntegralX, "diff:", diffX, "time:", timeDiff )
 	integralX := lastIntegralX + diffX*float64(timeDiff)
 	integralY := lastIntegralY + diffY*float64(timeDiff)
 	derivativeX = (diffX - lastErrorX) / float64(timeDiff)
 	derivativeY = (diffY - lastErrorY) / float64(timeDiff)
+	//fmt.Println("pre-scaled integral X:" ,integralX,"pre-scaled integral Y:", integralY)
+	//fmt.Println("scaled integral X:", (KiX*integralX), "scaled integral Y:", (KiY*integralY))
+	//fmt.Println("error-lasterrorX:", diffX-lastErrorX, "error-lasterrorY:", diffY-lastErrorY, "timediff:", timeDiff)
+	//fmt.Println("Pre-scaled derivative X:", derivativeX, "pre-scaled derivative Y:", derivativeY)
+	//fmt.Println("scaled derivative X:", (KdX*derivativeX), "scaled derivative Y:", (KdY*derivativeY))
 	velX := (KpX * diffX) + (KiX * integralX) + (KdX * derivativeX) //use PID control to calculate x velocity
 	velY := (KpY * diffY) + (KiY * integralY) + (KdY * derivativeY) //use PID control to calculate Y velocity
 	newX := float64(tracker.X) + velX                               //Where to move our tracking dot to
 	newY := float64(tracker.Y) + velY                               //Where to move our tracking dot to
-	lastUpdate = time.Now()
-	lastErrorX = diffX
+	lastUpdate = currentTime
+	lastErrorX = diffX //gocv.Circle(&img, correction, 10, colornames.Midnightblue, 3) //Mark the simulated movement to the detection
 	lastErrorY = diffY
 	lastIntegralX = integralX
 	lastIntegralY = integralY
-	fmt.Println("velX", velX, "velY", velY, "newX", newX, "newY", newY)
+	//fmt.Println("diffX:", diffX, "diffY:", diffY, "velX:", velX, "velY:", velY)
 	return image.Point{X: int(newX), Y: int(newY)}, image.Point{X: int(velX), Y: int(velY)}
 }
 
-func handleMovement(target image.Point, drone tello.Driver) {
+func handleMovement(target image.Point) {
 	if target.X > 0 { //If X > 0, then face is to left of drone, so we want to move left
-		xval := int(math.Abs(float64(target.X)))
-		drone.Left(xval)
+		if target.X > 10 { //Limit how fast we'll try to move at once
+			drone.Right(10)
+			fmt.Println("moved Right 10")
+		} else {
+			xval := int(math.Abs(float64(target.X)))
+			drone.Right(xval)
+			fmt.Println("moved Right ", xval)
+		}
 	} else if target.X < 0 { //If x < 0, then face is to right of drone, want to move right. simply get absolute value of x to get speed to hand off to drone command.
-		xval := int(math.Abs(float64(target.X)))
-		drone.Right(xval)
+		if target.X < -10 { //Limit how fast we'll try to move at once
+			drone.Left(10)
+			fmt.Println("moved Left 10")
+		} else {
+			xval := int(math.Abs(float64(target.X)))
+			drone.Left(xval)
+			fmt.Println("moved Left ", xval)
+		}
 	} else {
 		drone.Hover()
+		fmt.Println("hovering")
 	}
 	if target.Y > 0 {
-		yval := int(math.Abs(float64(target.Y)))
-		drone.Up(yval)
+		if target.Y > 10 { //Limit how fast we'll try to move at once
+			//drone.Up(10)
+			fmt.Println("Moved up 10")
+		} else {
+			yval := int(math.Abs(float64(target.Y)))
+			//drone.Up(yval)
+			fmt.Println("Moved up ", yval)
+		}
 	} else if target.Y < 0 {
-		yval := int(math.Abs(float64(target.Y)))
-		drone.Down(yval)
+		if target.Y < -10 { //Limit how fast we'll try to move at once
+			//drone.Down(10)
+			fmt.Println("moved down 10")
+		} else {
+			yval := int(math.Abs(float64(target.Y)))
+			//drone.Down(yval)
+			fmt.Println("moved down ", yval)
+		}
 	} else {
-		drone.Hover()
+		//drone.Hover()
 	}
 	//ADD CODE: IF detection is to small, move forward a bit
 	//else if detection size OK, HOVER
