@@ -38,13 +38,14 @@ import (
 )
 
 const (
-	frameSize = 960 * 720 * 3
-	MAXWIDTH  = 960 //drone FOV width in pixels
-	MAXHEIGHT = 720
-	CURSORX   = MAXWIDTH / 2
-	CURSORY   = MAXHEIGHT / 2
-	TOOCLOSE  = 350 //Any detected object wider than this width should stop the drone
-	TOOFAR    = 50  //Any detected object smaller than this width should be dropped from detection
+	frameSize     = 960 * 720 * 3
+	MAXWIDTH      = 960 //drone FOV width in pixels
+	MAXHEIGHT     = 720
+	CURSORX       = MAXWIDTH / 2
+	CURSORY       = MAXHEIGHT / 2
+	TOOCLOSE      = 550 //Any detected object wider than this width should stop the drone
+	TOOFAR        = 50  //Any detected object smaller than this width should be dropped from detection
+	FISTTHRESHOLD = 75  //Size for fist detection
 )
 
 var left int
@@ -89,7 +90,10 @@ func main() {
 	window := gocv.NewWindow("Demo2")
 	classifier := gocv.NewCascadeClassifier()
 	classifier.Load("haarcascade_frontalface_default.xml")
+	fistClassifier := gocv.NewCascadeClassifier()
+	fistClassifier.Load("fist.xml")
 	defer classifier.Close()
+	defer fistClassifier.Close()
 	ffmpeg := exec.Command("ffmpeg", "-i", "pipe:0", "-pix_fmt", "bgr24", "-vcodec", "rawvideo",
 		"-an", "-sn", "-s", "960x720", "-f", "rawvideo", "pipe:1")
 	ffmpegIn, _ := ffmpeg.StdinPipe()
@@ -131,7 +135,7 @@ func main() {
 	)
 
 	robot.Start(false)
-	drone.TakeOff()
+	//drone.TakeOff()
 	for {
 		buf := make([]byte, frameSize)
 		if _, err := io.ReadFull(ffmpegOut, buf); err != nil {
@@ -161,9 +165,17 @@ func main() {
 		gocv.Circle(&img, crosshair, 8, colornames.Magenta, 3) //Show the drone crosshair
 		if newImage {
 			imageRectangles := classifier.DetectMultiScale(img)
+			fistRectangles := fistClassifier.DetectMultiScale(img)
 			for _, rect := range imageRectangles {
 				center, size := getCenter(rect)
 				if size.X > TOOFAR {
+					for _, fist := range fistRectangles { //Get additional gesture data
+						if fist.Dx() > FISTTHRESHOLD {
+							log.Println("found a fist,", fist)
+							gocv.Rectangle(&img, fist, colornames.Hotpink, 5)
+							drone.FrontFlip()
+						}
+					}
 					//fmt.Println("Object size: ", size.X, "x", size.Y)
 					gocv.Rectangle(&img, rect, colornames.Cadetblue, 3)          //Box our detection
 					gocv.Circle(&img, center, 5, colornames.Cadetblue, 3)        //Mark the center of the detection
@@ -171,18 +183,17 @@ func main() {
 					//HERE WE WANT TO MOVE OUR TRACKER TOWARDS THE DETECTION USING PID CONTROL ALGORITHM
 					newCorrection, movement := getTargetOutput(center, correction) //Run our error checking algorithm to determine where to go
 					correction = newCorrection
-					if moveDrone {
-						if size.X > TOOCLOSE {
-							fmt.Println("Too close!")
-							drone.Land()
-						} else if size.X > TOOFAR {
-							gocv.Circle(&img, newCorrection, 10, colornames.Midnightblue, 3) //Mark the simulated movement to the detection
-							handleMovement(movement)                                         //Move the drone based on the error-corrected X and Y velocities
-							//time.Sleep(200)
-						} else {
-							drone.Hover()
-						}
+					//if moveDrone {
+					if size.X > TOOCLOSE {
+						fmt.Println("Too close!")
+						drone.Land()
+					} else if size.X > TOOFAR {
+						gocv.Circle(&img, newCorrection, 10, colornames.Midnightblue, 3) //Mark the simulated movement to the detection
+						handleMovement(movement)                                         //Move the drone based on the error-corrected X and Y velocities
+					} else {
+						drone.Hover()
 					}
+					//}
 					moveDrone = !moveDrone
 				} else {
 					fmt.Println("Too far away")
