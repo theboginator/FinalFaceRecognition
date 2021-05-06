@@ -50,6 +50,9 @@ func main() {
 	classifier2 := gocv.NewCascadeClassifier()
 	classifier2.Load("fist.xml")
 	defer classifier2.Close()
+	classifier3 := gocv.NewCascadeClassifier()
+	classifier3.Load("palm.xml")
+	defer classifier3.Close()
 	ffmpeg := exec.Command("ffmpeg", "-i", "pipe:0", "-pix_fmt", "bgr24", "-vcodec", "rawvideo",
 		"-an", "-sn", "-s", "960x720", "-f", "rawvideo", "pipe:1")
 	ffmpegIn, _ := ffmpeg.StdinPipe()
@@ -91,6 +94,7 @@ func main() {
 	)
 
 	robot.Start(false)
+	drone.TakeOff()
 	for {
 		buf := make([]byte, frameSize)
 		if _, err := io.ReadFull(ffmpegOut, buf); err != nil {
@@ -117,9 +121,22 @@ func main() {
 		imageRectangles2 := classifier2.DetectMultiScale(img)
 
 		for _, rect2 := range imageRectangles2 {
-			log.Println("found a hand,", rect2)
+			log.Println("found a fist,", rect2)
 			gocv.Rectangle(&img, rect2, colornames.Hotpink, 5)
+			if rect2.Dx() > 400 {
+				drone.FrontFlip()
+			}
 		}
+
+		imageRectangles3 := classifier3.DetectMultiScale(img)
+
+		for _, rect3 := range imageRectangles3 {
+			log.Println("watching gesture", rect3)
+			gocv.Rectangle(&img, rect3, colornames.Black, 5)
+			drone.Halt()
+		}
+
+
 
 
 		window.IMShow(img)
